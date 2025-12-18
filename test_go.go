@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -10,100 +11,132 @@ import (
 	"github.com/joho/godotenv"
 )
 
-func main() {
-	// Load .env
-	err := godotenv.Load()
-	if err != nil {
-		panic("Error loading .env file")
-	}
+const (
+	TEST_RUNS  = 10
+	INNER_RUNS = 50
+)
 
-	dbHost := os.Getenv("DB_HOST")
-	dbUser := os.Getenv("DB_USER")
-	dbPassword := os.Getenv("DB_PASSWORD")
-	dbName := os.Getenv("DB_NAME")
-	dbPort := os.Getenv("DB_PORT")
+type QueryTest struct {
+	name  string
+	query string
+}
 
-	fmt.Println("DB_HOST =", dbHost)
-	fmt.Println("DB_USER =", dbUser)
-	fmt.Println("DB_NAME =", dbName)
+var queries = []QueryTest{
+	{
+		"LIGHT_1_simple_select",
+		`SELECT trip_id, trip_status, expenses
+		 FROM tripdetails;`,
+	},
+	{
+		"LIGHT_2_where",
+		`SELECT trip_id, trip_status
+		 FROM tripdetails
+		 WHERE trip_status = 'Completed';`,
+	},
+	{
+		"MEDIUM_3_join",
+		`SELECT td.trip_id, c.full_name_or_company, td.trip_status
+		 FROM tripdetails td
+		 JOIN orders o ON td.order_id = o.order_id
+		 JOIN client c ON o.client_id = c.client_id;`,
+	},
+	{
+		"MEDIUM_4_join_where",
+		`SELECT td.trip_id, c.full_name_or_company
+		 FROM tripdetails td
+		 JOIN orders o ON td.order_id = o.order_id
+		 JOIN client c ON o.client_id = c.client_id
+		 WHERE td.trip_status = 'In progress';`,
+	},
+	{
+		"HEAVY_5_group_by",
+		`SELECT c.client_type, AVG(td.expenses)
+		 FROM tripdetails td
+		 JOIN orders o ON td.order_id = o.order_id
+		 JOIN client c ON o.client_id = c.client_id
+		 GROUP BY c.client_type;`,
+	},
+	{
+		"HEAVY_6_top_clients",
+		`SELECT c.full_name_or_company, SUM(td.expenses) AS total_expenses
+		 FROM tripdetails td
+		 JOIN orders o ON td.order_id = o.order_id
+		 JOIN client c ON o.client_id = c.client_id
+		 GROUP BY c.client_id
+		 ORDER BY total_expenses DESC
+		 LIMIT 5;`,
+	},
+	{
+		"HEAVY_7_nested_query",
+		`SELECT
+		     td.trip_id,
+		     c.full_name_or_company,
+		     d.full_name,
+		     v.registration_number,
+		     td.trip_status,
+		     td.expenses
+		 FROM tripdetails td
+		 JOIN orders o ON td.order_id = o.order_id
+		 JOIN client c ON o.client_id = c.client_id
+		 LEFT JOIN driver d ON td.driver_id = d.driver_id
+		 LEFT JOIN vehicle v ON td.vehicle_id = v.vehicle_id
+		 WHERE td.expenses > (
+		     SELECT AVG(expenses) FROM tripdetails
+		 );`,
+	},
+}
 
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%s)/%s",
-		dbUser,
-		dbPassword,
-		dbHost,
-		dbPort,
-		dbName,
-	)
+func runQuery(db *sql.DB, query string) time.Duration {
+	start := time.Now()
 
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		panic(err)
-	}
-	defer db.Close()
-
-	if err := db.Ping(); err != nil {
-		panic(err)
-	}
-
-	fmt.Println("\nGo DB performance test\n")
-
-	queries := map[string]string{
-		"LIGHT_1_simple_select": `
-			SELECT * FROM Client;
-		`,
-		"MEDIUM_1_join": `
-			SELECT c.full_name_or_company, o.route_description
-			FROM Client c
-			JOIN Orders o ON c.client_id = o.client_id;
-		`,
-		"MEDIUM_2_join_where": `
-			SELECT d.full_name, td.trip_status
-			FROM Driver d
-			JOIN TripDetails td ON d.driver_id = td.driver_id
-			WHERE td.trip_status = 'completed';
-		`,
-		"HEAVY_1_group_by": `
-			SELECT d.full_name, COUNT(td.trip_id) AS trips_count
-			FROM Driver d
-			JOIN TripDetails td ON d.driver_id = td.driver_id
-			GROUP BY d.full_name;
-		`,
-		"HEAVY_2_nested_query": `
-			SELECT full_name_or_company
-			FROM Client
-			WHERE client_id IN (
-				SELECT client_id
-				FROM Orders
-				GROUP BY client_id
-				HAVING COUNT(order_id) > 1
-			);
-		`,
-	}
-
-	for name, query := range queries {
-		var times []time.Duration
-
-		for i := 0; i < 5; i++ {
-			start := time.Now()
-
-			rows, err := db.Query(query)
-			if err != nil {
-				panic(err)
-			}
+	for i := 0; i < INNER_RUNS; i++ {
+		rows, err := db.Query(query)
+		if err == nil {
 			for rows.Next() {
 			}
 			rows.Close()
+		}
+	}
 
-			times = append(times, time.Since(start))
+	return time.Since(start)
+}
+
+func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	dbUser := os.Getenv("DB_USER")
+	dbPassword := os.Getenv("DB_PASSWORD")
+	dbName := os.Getenv("DB_NAME")
+	dbHost := os.Getenv("DB_HOST")
+	dbPort := os.Getenv("DB_PORT")
+
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s",
+		dbUser, dbPassword, dbHost, dbPort, dbName)
+
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	fmt.Println("Go database performance test\n")
+
+	for _, q := range queries {
+		var times []time.Duration
+
+		for i := 0; i < TEST_RUNS; i++ {
+			t := runQuery(db, q.query)
+			times = append(times, t)
 		}
 
-		var sum time.Duration
-		min := times[0]
-		max := times[0]
+		min, max := times[0], times[0]
+		var total time.Duration
 
 		for _, t := range times {
-			sum += t
+			total += t
 			if t < min {
 				min = t
 			}
@@ -112,11 +145,11 @@ func main() {
 			}
 		}
 
-		avg := sum / time.Duration(len(times))
+		avg := total / time.Duration(len(times))
 
-		fmt.Println(name)
-		fmt.Printf("  avg: %v\n", avg)
-		fmt.Printf("  min: %v\n", min)
-		fmt.Printf("  max: %v\n\n", max)
+		fmt.Println(q.name)
+		fmt.Printf("  avg: %.6f s\n", avg.Seconds())
+		fmt.Printf("  min: %.6f s\n", min.Seconds())
+		fmt.Printf("  max: %.6f s\n\n", max.Seconds())
 	}
 }
